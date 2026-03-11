@@ -426,6 +426,8 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
 
         try
         {
+            var (traceparent, tracestate) = TelemetryHelpers.GetTraceContext();
+
             var request = new CreateSessionRequest(
                 config.Model,
                 sessionId,
@@ -448,7 +450,9 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
                 config.ConfigDir,
                 config.SkillDirectories,
                 config.DisabledSkills,
-                config.InfiniteSessions);
+                config.InfiniteSessions,
+                traceparent,
+                tracestate);
 
             var response = await InvokeRpcAsync<CreateSessionResponse>(
                 connection.Rpc, "session.create", [request], cancellationToken);
@@ -530,6 +534,8 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
 
         try
         {
+            var (traceparent, tracestate) = TelemetryHelpers.GetTraceContext();
+
             var request = new ResumeSessionRequest(
                 sessionId,
                 config.ClientName,
@@ -553,7 +559,9 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
                 config.Agent,
                 config.SkillDirectories,
                 config.DisabledSkills,
-                config.InfiniteSessions);
+                config.InfiniteSessions,
+                traceparent,
+                tracestate);
 
             var response = await InvokeRpcAsync<ResumeSessionResponse>(
                 connection.Rpc, "session.resume", [request], cancellationToken);
@@ -1064,6 +1072,17 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
             startInfo.Environment["COPILOT_SDK_AUTH_TOKEN"] = options.GitHubToken;
         }
 
+        // Set telemetry environment variables if configured
+        if (options.Telemetry is { } telemetry)
+        {
+            startInfo.Environment["COPILOT_OTEL_ENABLED"] = "true";
+            if (telemetry.OtlpEndpoint is not null) startInfo.Environment["OTEL_EXPORTER_OTLP_ENDPOINT"] = telemetry.OtlpEndpoint;
+            if (telemetry.FilePath is not null) startInfo.Environment["COPILOT_OTEL_FILE_EXPORTER_PATH"] = telemetry.FilePath;
+            if (telemetry.ExporterType is not null) startInfo.Environment["COPILOT_OTEL_EXPORTER_TYPE"] = telemetry.ExporterType;
+            if (telemetry.SourceName is not null) startInfo.Environment["COPILOT_OTEL_SOURCE_NAME"] = telemetry.SourceName;
+            if (telemetry.CaptureContent is { } capture) startInfo.Environment["OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"] = capture ? "true" : "false";
+        }
+
         var cliProcess = new Process { StartInfo = startInfo };
         cliProcess.Start();
 
@@ -1320,8 +1339,12 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
         public async Task<ToolCallResponseV2> OnToolCallV2(string sessionId,
             string toolCallId,
             string toolName,
-            object? arguments)
+            object? arguments,
+            string? traceparent = null,
+            string? tracestate = null)
         {
+            using var _ = TelemetryHelpers.RestoreTraceContext(traceparent, tracestate);
+
             var session = client.GetSession(sessionId) ?? throw new ArgumentException($"Unknown session {sessionId}");
             if (session.GetTool(toolName) is not { } tool)
             {
@@ -1453,7 +1476,9 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
         string? ConfigDir,
         List<string>? SkillDirectories,
         List<string>? DisabledSkills,
-        InfiniteSessionConfig? InfiniteSessions);
+        InfiniteSessionConfig? InfiniteSessions,
+        string? Traceparent = null,
+        string? Tracestate = null);
 
     internal record ToolDefinition(
         string Name,
@@ -1496,7 +1521,9 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
         string? Agent,
         List<string>? SkillDirectories,
         List<string>? DisabledSkills,
-        InfiniteSessionConfig? InfiniteSessions);
+        InfiniteSessionConfig? InfiniteSessions,
+        string? Traceparent = null,
+        string? Tracestate = null);
 
     internal record ResumeSessionResponse(
         string SessionId,

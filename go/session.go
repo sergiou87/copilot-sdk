@@ -111,11 +111,14 @@ func newSession(sessionID string, client *jsonrpc2.Client, workspacePath string)
 //	    log.Printf("Failed to send message: %v", err)
 //	}
 func (s *Session) Send(ctx context.Context, options MessageOptions) (string, error) {
+	traceparent, tracestate := getTraceContext(ctx)
 	req := sessionSendRequest{
 		SessionID:   s.SessionID,
 		Prompt:      options.Prompt,
 		Attachments: options.Attachments,
 		Mode:        options.Mode,
+		Traceparent: traceparent,
+		Tracestate:  tracestate,
 	}
 
 	result, err := s.client.Request("session.send", req)
@@ -481,7 +484,14 @@ func (s *Session) handleBroadcastEvent(event SessionEvent) {
 		if event.Data.ToolCallID != nil {
 			toolCallID = *event.Data.ToolCallID
 		}
-		go s.executeToolAndRespond(*requestID, *toolName, toolCallID, event.Data.Arguments, handler)
+		var tp, ts string
+		if event.Data.Traceparent != nil {
+			tp = *event.Data.Traceparent
+		}
+		if event.Data.Tracestate != nil {
+			ts = *event.Data.Tracestate
+		}
+		go s.executeToolAndRespond(*requestID, *toolName, toolCallID, event.Data.Arguments, handler, tp, ts)
 
 	case PermissionRequested:
 		requestID := event.Data.RequestID
@@ -497,11 +507,12 @@ func (s *Session) handleBroadcastEvent(event SessionEvent) {
 }
 
 // executeToolAndRespond executes a tool handler and sends the result back via RPC.
-func (s *Session) executeToolAndRespond(requestID, toolName, toolCallID string, arguments any, handler ToolHandler) {
+func (s *Session) executeToolAndRespond(requestID, toolName, toolCallID string, arguments any, handler ToolHandler, traceparent, tracestate string) {
+	ctx := contextWithTraceParent(context.Background(), traceparent, tracestate)
 	defer func() {
 		if r := recover(); r != nil {
 			errMsg := fmt.Sprintf("tool panic: %v", r)
-			s.RPC.Tools.HandlePendingToolCall(context.Background(), &rpc.SessionToolsHandlePendingToolCallParams{
+			s.RPC.Tools.HandlePendingToolCall(ctx, &rpc.SessionToolsHandlePendingToolCallParams{
 				RequestID: requestID,
 				Error:     &errMsg,
 			})
@@ -518,7 +529,7 @@ func (s *Session) executeToolAndRespond(requestID, toolName, toolCallID string, 
 	result, err := handler(invocation)
 	if err != nil {
 		errMsg := err.Error()
-		s.RPC.Tools.HandlePendingToolCall(context.Background(), &rpc.SessionToolsHandlePendingToolCallParams{
+		s.RPC.Tools.HandlePendingToolCall(ctx, &rpc.SessionToolsHandlePendingToolCallParams{
 			RequestID: requestID,
 			Error:     &errMsg,
 		})
@@ -529,7 +540,7 @@ func (s *Session) executeToolAndRespond(requestID, toolName, toolCallID string, 
 	if resultStr == "" {
 		resultStr = fmt.Sprintf("%v", result)
 	}
-	s.RPC.Tools.HandlePendingToolCall(context.Background(), &rpc.SessionToolsHandlePendingToolCallParams{
+	s.RPC.Tools.HandlePendingToolCall(ctx, &rpc.SessionToolsHandlePendingToolCallParams{
 		RequestID: requestID,
 		Result:    &rpc.ResultUnion{String: &resultStr},
 	})
